@@ -1,0 +1,2 @@
+-- RC7 preserves the result shape and MVCC helper contract.
+-- API and build identity require the bounded PG17/18 range-prefetch install.

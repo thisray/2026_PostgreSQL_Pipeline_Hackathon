@@ -1,0 +1,384 @@
+{
+  "job": {
+    "job_id": "00000000000000000000000000000000",
+    "schema_name": "pgdm_shadow_test",
+    "payload": {
+      "catalog": {
+        "indexes": [
+          {
+            "name": "table5_id_column_2_when_id_column_3_null_key",
+            "table": "table5",
+            "definition": "CREATE UNIQUE INDEX table5_id_column_2_when_id_column_3_null_key ON public.table5 USING btree (id_column_2) WHERE (id_column_3 IS NULL)"
+          },
+          {
+            "name": "table5_id_column_3_not_null_key",
+            "table": "table5",
+            "definition": "CREATE UNIQUE INDEX table5_id_column_3_not_null_key ON public.table5 USING btree (id_column_3) WHERE (id_column_3 IS NOT NULL)"
+          }
+        ],
+        "scope_rows": 30000000,
+        "constraints": [
+          {
+            "name": "table1_id_column_1_not_null",
+            "type": "n",
+            "table": "table1",
+            "definition": "NOT NULL id_column_1",
+            "index_name": null,
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": null,
+            "reference_schema": null
+          },
+          {
+            "name": "table1_id_column_3_fkey",
+            "type": "f",
+            "table": "table1",
+            "definition": "FOREIGN KEY (id_column_3) REFERENCES public.raw_data(raw_id) ON UPDATE CASCADE ON DELETE CASCADE",
+            "index_name": "raw_data_pkey",
+            "referenced_oid": "52108",
+            "reference_table": "raw_data",
+            "index_definition": null,
+            "reference_schema": "public"
+          },
+          {
+            "name": "table1_id_column_3_key",
+            "type": "u",
+            "table": "table1",
+            "definition": "UNIQUE (id_column_3)",
+            "index_name": "table1_id_column_3_key",
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": "CREATE UNIQUE INDEX table1_id_column_3_key ON public.table1 USING btree (id_column_3)",
+            "reference_schema": null
+          },
+          {
+            "name": "table1_id_column_3_not_null",
+            "type": "n",
+            "table": "table1",
+            "definition": "NOT NULL id_column_3",
+            "index_name": null,
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": null,
+            "reference_schema": null
+          },
+          {
+            "name": "table1_id_column_4_fkey",
+            "type": "f",
+            "table": "table1",
+            "definition": "FOREIGN KEY (id_column_4) REFERENCES public.table3(id_column_1) ON UPDATE CASCADE ON DELETE CASCADE",
+            "index_name": "table3_pkey",
+            "referenced_oid": "52118",
+            "reference_table": "table3",
+            "index_definition": null,
+            "reference_schema": "public"
+          },
+          {
+            "name": "table1_pkey",
+            "type": "p",
+            "table": "table1",
+            "definition": "PRIMARY KEY (id_column_1)",
+            "index_name": "table1_pkey",
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": "CREATE UNIQUE INDEX table1_pkey ON public.table1 USING btree (id_column_1)",
+            "reference_schema": null
+          },
+          {
+            "name": "table2_id_column_1_not_null",
+            "type": "n",
+            "table": "table2",
+            "definition": "NOT NULL id_column_1",
+            "index_name": null,
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": null,
+            "reference_schema": null
+          },
+          {
+            "name": "table2_id_column_2_fkey",
+            "type": "f",
+            "table": "table2",
+            "definition": "FOREIGN KEY (id_column_2) REFERENCES public.table1(id_column_1) ON UPDATE CASCADE ON DELETE CASCADE",
+            "index_name": "table1_pkey",
+            "referenced_oid": "52135",
+            "reference_table": "table1",
+            "index_definition": null,
+            "reference_schema": "public"
+          },
+          {
+            "name": "table2_id_column_2_integer_column_1_key",
+            "type": "u",
+            "table": "table2",
+            "definition": "UNIQUE (id_column_2, integer_column_1)",
+            "index_name": "table2_id_column_2_integer_column_1_key",
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": "CREATE UNIQUE INDEX table2_id_column_2_integer_column_1_key ON public.table2 USING btree (id_column_2, integer_column_1)",
+            "reference_schema": null
+          },
+          {
+            "name": "table2_id_column_2_not_null",
+            "type": "n",
+            "table": "table2",
+            "definition": "NOT NULL id_column_2",
+            "index_name": null,
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": null,
+            "reference_schema": null
+          },
+          {
+            "name": "table2_integer_column_1_not_null",
+            "type": "n",
+            "table": "table2",
+            "definition": "NOT NULL integer_column_1",
+            "index_name": null,
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": null,
+            "reference_schema": null
+          },
+          {
+            "name": "table2_pkey",
+            "type": "p",
+            "table": "table2",
+            "definition": "PRIMARY KEY (id_column_1)",
+            "index_name": "table2_pkey",
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": "CREATE UNIQUE INDEX table2_pkey ON public.table2 USING btree (id_column_1)",
+            "reference_schema": null
+          },
+          {
+            "name": "table2_text_column_1_check",
+            "type": "c",
+            "table": "table2",
+            "definition": "CHECK (((text_column_1 IS NULL) OR ((text_column_1)::text = ANY ((ARRAY['X'::character varying, 'Y'::character varying, 'Z'::character varying])::text[]))))",
+            "index_name": null,
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": null,
+            "reference_schema": null
+          },
+          {
+            "name": "table3_id_column_1_not_null",
+            "type": "n",
+            "table": "table3",
+            "definition": "NOT NULL id_column_1",
+            "index_name": null,
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": null,
+            "reference_schema": null
+          },
+          {
+            "name": "table3_pkey",
+            "type": "p",
+            "table": "table3",
+            "definition": "PRIMARY KEY (id_column_1)",
+            "index_name": "table3_pkey",
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": "CREATE UNIQUE INDEX table3_pkey ON public.table3 USING btree (id_column_1)",
+            "reference_schema": null
+          },
+          {
+            "name": "table4_id_column_1_not_null",
+            "type": "n",
+            "table": "table4",
+            "definition": "NOT NULL id_column_1",
+            "index_name": null,
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": null,
+            "reference_schema": null
+          },
+          {
+            "name": "table4_pkey",
+            "type": "p",
+            "table": "table4",
+            "definition": "PRIMARY KEY (id_column_1)",
+            "index_name": "table4_pkey",
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": "CREATE UNIQUE INDEX table4_pkey ON public.table4 USING btree (id_column_1)",
+            "reference_schema": null
+          },
+          {
+            "name": "table5_id_column_1_not_null",
+            "type": "n",
+            "table": "table5",
+            "definition": "NOT NULL id_column_1",
+            "index_name": null,
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": null,
+            "reference_schema": null
+          },
+          {
+            "name": "table5_id_column_2_fkey",
+            "type": "f",
+            "table": "table5",
+            "definition": "FOREIGN KEY (id_column_2) REFERENCES public.table1(id_column_1) ON UPDATE CASCADE ON DELETE CASCADE",
+            "index_name": "table1_pkey",
+            "referenced_oid": "52135",
+            "reference_table": "table1",
+            "index_definition": null,
+            "reference_schema": "public"
+          },
+          {
+            "name": "table5_id_column_2_not_null",
+            "type": "n",
+            "table": "table5",
+            "definition": "NOT NULL id_column_2",
+            "index_name": null,
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": null,
+            "reference_schema": null
+          },
+          {
+            "name": "table5_pkey",
+            "type": "p",
+            "table": "table5",
+            "definition": "PRIMARY KEY (id_column_1)",
+            "index_name": "table5_pkey",
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": "CREATE UNIQUE INDEX table5_pkey ON public.table5 USING btree (id_column_1)",
+            "reference_schema": null
+          },
+          {
+            "name": "table6_id_column_1_not_null",
+            "type": "n",
+            "table": "table6",
+            "definition": "NOT NULL id_column_1",
+            "index_name": null,
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": null,
+            "reference_schema": null
+          },
+          {
+            "name": "table6_id_column_2_fkey",
+            "type": "f",
+            "table": "table6",
+            "definition": "FOREIGN KEY (id_column_2) REFERENCES public.table1(id_column_1) ON UPDATE CASCADE ON DELETE CASCADE",
+            "index_name": "table1_pkey",
+            "referenced_oid": "52135",
+            "reference_table": "table1",
+            "index_definition": null,
+            "reference_schema": "public"
+          },
+          {
+            "name": "table6_id_column_2_id_column_3_key",
+            "type": "u",
+            "table": "table6",
+            "definition": "UNIQUE (id_column_2, id_column_3)",
+            "index_name": "table6_id_column_2_id_column_3_key",
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": "CREATE UNIQUE INDEX table6_id_column_2_id_column_3_key ON public.table6 USING btree (id_column_2, id_column_3)",
+            "reference_schema": null
+          },
+          {
+            "name": "table6_id_column_2_not_null",
+            "type": "n",
+            "table": "table6",
+            "definition": "NOT NULL id_column_2",
+            "index_name": null,
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": null,
+            "reference_schema": null
+          },
+          {
+            "name": "table6_id_column_3_fkey",
+            "type": "f",
+            "table": "table6",
+            "definition": "FOREIGN KEY (id_column_3) REFERENCES public.table4(id_column_1) ON UPDATE CASCADE ON DELETE CASCADE",
+            "index_name": "table4_pkey",
+            "referenced_oid": "52126",
+            "reference_table": "table4",
+            "index_definition": null,
+            "reference_schema": "public"
+          },
+          {
+            "name": "table6_pkey",
+            "type": "p",
+            "table": "table6",
+            "definition": "PRIMARY KEY (id_column_1)",
+            "index_name": "table6_pkey",
+            "referenced_oid": "0",
+            "reference_table": null,
+            "index_definition": "CREATE UNIQUE INDEX table6_pkey ON public.table6 USING btree (id_column_1)",
+            "reference_schema": null
+          }
+        ]
+      },
+      "dimension_rows": {
+        "table3": 4,
+        "table4": 27
+      }
+    },
+    "target_identity": {
+      "table1": "52135",
+      "table2": "52157",
+      "table3": "52118",
+      "table4": "52126",
+      "table5": "52176",
+      "table6": "52193"
+    }
+  },
+  "snapshot": {
+    "constraints": [
+      {
+        "name": "table4_id_column_1_not_null",
+        "type": "n",
+        "table": "table4",
+        "validated": true
+      },
+      {
+        "name": "table4_pkey",
+        "type": "p",
+        "table": "table4",
+        "validated": true
+      }
+    ],
+    "valid_indexes": [
+      "table4_pkey"
+    ],
+    "row_counts": {
+      "table1": 30000000,
+      "table2": 69678564,
+      "table3": 0,
+      "table4": 0,
+      "table5": 30000000,
+      "table6": 30000000
+    },
+    "index_widths": {
+      "table1_pkey": 8,
+      "table1_id_column_3_key": 8,
+      "table2_id_column_2_integer_column_1_key": 10,
+      "table2_pkey": 8,
+      "table6_id_column_2_id_column_3_key": 10,
+      "table6_pkey": 8,
+      "table3_pkey": 8,
+      "table5_pkey": 8,
+      "table5_id_column_2_when_id_column_3_null_key": 8,
+      "table5_id_column_3_not_null_key": 8
+    },
+    "memory": {
+      "effective_cpus": 8
+    },
+    "cpu_limits": {
+      "max_parallel_workers": 8,
+      "max_worker_processes": 8,
+      "busy_parallel_workers": 0,
+      "max_parallel_maintenance_workers": 2,
+      "effective_cpus": 8
+    }
+  },
+  "budget": 8192
+}

@@ -1,0 +1,3 @@
+native/pgdm_bulk/*.c text eol=lf
+native/pgdm_bulk/*.h text eol=lf
+native/pgdm_bulk/*.inc text eol=lf

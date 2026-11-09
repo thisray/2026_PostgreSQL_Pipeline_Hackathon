@@ -12,6 +12,7 @@ Mapa dos módulos:
     Toda a lógica de SSH, psql, pg_dump e auditoria/versionamento.
 """
 
+import gc
 import os
 import json
 import socket
@@ -19,7 +20,7 @@ import threading
 import time
 import traceback
 from datetime import datetime
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, Menu
 import customtkinter as ctk
 from config import (
     APP_GEOMETRY,
@@ -262,7 +263,9 @@ class App(ctk.CTk):
             details = None
             versions = None
             if self.current_db == database_name:
-                tables = self.service.list_tables(database_name)
+                tables = result.pop('_refreshed_tables', None)
+                if tables is None:
+                    tables = self.service.list_tables(database_name)
                 details = self.service.get_table_details(database_name, target_full_table_name)
                 self.ui(
                     self.update_restore_version_progress,
@@ -397,7 +400,16 @@ class App(ctk.CTk):
             target(*args)
 
         thread_name = f"async-{target_name[:24]}"
-        threading.Thread(target=runner, daemon=True, name=thread_name).start()
+        # Tk font finalizers may synchronously call the UI thread during GC.
+        # Thread.start waits for bootstrap, so GC there can deadlock both threads.
+        gc_enabled = gc.isenabled()
+        if gc_enabled:
+            gc.disable()
+        try:
+            threading.Thread(target=runner, daemon=True, name=thread_name).start()
+        finally:
+            if gc_enabled:
+                gc.enable()
 
     def set_status(self, text: str, state: str = "error"):
         self.status_label.configure(text=text)
@@ -1512,6 +1524,10 @@ class App(ctk.CTk):
             state="disabled",
         )
         self.expand_button.grid(row=0, column=4, sticky="w")
+        self.expansion_menu = Menu(self, tearoff=False)
+        self.expansion_menu.add_command(label="Discard interrupted expansion...", command=self.discard_interrupted_expansion_flow)
+        self.expand_button.bind("<Button-3>", lambda event: self.expansion_menu.tk_popup(event.x_root, event.y_root))
+
 
         self.dictionary_edit_button = ctk.CTkButton(
             self.data_header,
@@ -5286,6 +5302,22 @@ class App(ctk.CTk):
             self.ui(self.set_status, "Erro ao criar colunas", "error")
             self.ui(self.show_error, "Error", str(e))
 
+    def discard_interrupted_expansion_flow(self):
+        if not self.current_db or not self.selected_table_name:
+            self.show_error("Error", "Select the source table first.")
+            return
+        if not messagebox.askyesno("Discard expansion", "Discard the interrupted expansion and release its source fence? Committed private chunks and indexes will be removed. Public destinations remain available.", parent=self):
+            return
+        database, source = self.current_db, self.selected_table_name
+        def worker():
+            try:
+                from services.s2_expansion import discard
+                discard(self.service, database, source)
+                self.ui(self.show_info, "Expansion discarded", "Private expansion removed; the source fence is released.")
+            except Exception as exc:
+                self.ui(self.show_error, "Could not discard expansion", str(exc))
+        self.run_async(worker)
+
     def execute_cross_table_expansion_flow(self):
         if not self.current_db or not self.selected_table_name:
             self.show_error("Error", "Select the source table first.")
@@ -5423,12 +5455,11 @@ class App(ctk.CTk):
                 10,
                 "Preparing version metadata...",
             )
-            with self.service.expansion_timing_scope(
-                timing_report,
-                "prepare",
-                "Ensure control database metadata",
-            ):
-                self.service.ensure_admin_schema(cancel_event=cancel_event)
+            if os.getenv("PDM_EXPANSION_MODE", "auto") not in {"auto", "shadow", "native", "native_bulk", "s2", "s3"}:
+                with self.service.expansion_timing_scope(
+                    timing_report, "prepare", "Ensure control database metadata",
+                ):
+                    self.service.ensure_admin_schema(cancel_event=cancel_event)
             self.ui(
                 self.update_cross_table_expansion_progress,
                 "prepare",
@@ -5496,7 +5527,9 @@ class App(ctk.CTk):
                 "refresh",
                 "Reload database table catalog",
             ):
-                tables = self.service.list_tables(database_name)
+                tables = result.pop('_refreshed_tables', None)
+                if tables is None:
+                    tables = self.service.list_tables(database_name)
 
             def apply_expansion_refresh():
                 with self.service.expansion_timing_scope(
@@ -5549,7 +5582,14 @@ class App(ctk.CTk):
             was_finalizing = self.cross_table_expansion_finalizing
             self.ui(self.close_cross_table_expansion_progress)
             self.ui(self.set_status, "Cross-table expansion error", "error")
-            if was_finalizing:
+            if was_finalizing and getattr(self.service, '_pending_expansion_job_id', None):
+                error_message = (
+                    "The data was committed safely. Run the same expansion again "
+                    "to finish pending version registration without reloading "
+                    "the completed data.\n\n"
+                    f"{exc}"
+                )
+            elif was_finalizing:
                 error_message = (
                     "The data had already been committed to the destinations, but "
                     "version finalization failed. Do not repeat the expansion "

@@ -1,0 +1,5 @@
+comment = 'Compact JSONB decoder and TID-range source reader for PostgreSQL 16/17/18'
+default_version = '1.1'
+module_pathname = '$libdir/pgdm_decode'
+relocatable = true
+superuser = true

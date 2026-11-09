@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import socket
 import threading
@@ -417,13 +418,10 @@ class ConnectionDialog(ctk.CTkToplevel):
         if not ssh_username:
             messagebox.showerror("Error", "Enter the SSH username.", parent=self)
             return
-        if not ssh_password:
-            messagebox.showerror("Error", "Enter the SSH password.", parent=self)
-            return
         if not sql_username:
             messagebox.showerror("Error", "Enter the PostgreSQL username.", parent=self)
             return
-        if not sql_password:
+        if not sql_password and os.getenv("PDM_POSTGRES_LOCAL_AUTH") != "1":
             messagebox.showerror("Error", "Enter the PostgreSQL password.", parent=self)
             return
 
@@ -8879,12 +8877,13 @@ class ExpansionTimingReportDialog(ctk.CTkToplevel):
         ).grid(row=0, column=0, padx=20, pady=(20, 6), sticky="w")
 
         measured_total = self.measured_total_seconds(self._report)
+        recovery_notice = 'Recovered work; historical timing incomplete. ' if self._report.get('historical_timing_complete') is False else ''
         source_rows = int(self._report.get("source_rows") or 0)
         inserted_rows = int(self._report.get("total_rows_inserted") or 0)
         ctk.CTkLabel(
             self,
             text=(
-                f"Measured processing total: {self._format_duration(measured_total)}   |   "
+                recovery_notice + f"Measured processing total: {self._format_duration(measured_total)}   |   "
                 f"Source rows: {source_rows:,}   |   Inserted rows: {inserted_rows:,}"
             ),
             font=ctk.CTkFont(size=14, weight="bold"),
@@ -8960,6 +8959,8 @@ class ExpansionTimingReportDialog(ctk.CTkToplevel):
             f"Completed:     {report.get('completed_at') or '-'}",
             f"Database:      {report.get('database_name') or '-'}",
             f"Source:        {report.get('source_table_name') or '-'}",
+            f"Engine:        {report.get('engine') or 'unknown'}",
+            f"Fallback:      {report.get('fallback_reason') or '-'}",
             "Raw schemas:   " + ", ".join(report.get("raw_schemas") or ["-"]),
             f"Source rows:   {int(report.get('source_rows') or 0):,}",
             f"Inserted rows: {int(report.get('total_rows_inserted') or 0):,}",
@@ -8971,6 +8972,27 @@ class ExpansionTimingReportDialog(ctk.CTkToplevel):
             "- Diagnostic envelope entries are shown but excluded from totals.",
         ]
 
+        if report.get('historical_timing_complete') is False:
+            lines.extend(['', 'RECOVERY REPORT: historical timing is incomplete; not a fresh performance benchmark.'])
+        if 'shadow_chunks_total' in report:
+            lines.extend(['', 'DURABLE RECOVERY',
+                          'Chunks reused/done/total: '
+                          f"{report.get('shadow_chunks_reused', 0)}/"
+                          f"{report.get('shadow_chunks_done', 0)}/"
+                          f"{report['shadow_chunks_total']}"])
+        if 'publication_tasks_reused' in report:
+            reused = report['publication_tasks_reused']
+            lines.append(f"Publication tasks reused: {len(reused)}")
+            lines.extend('- ' + name for name in reused)
+        chunk_policy = report.get('chunk_worker_policy') or {}
+        if chunk_policy:
+            lines.extend(['', f"Chunk workers: {chunk_policy['chosen_workers']} (server CPU budget {chunk_policy['effective_cpus']}, requested {chunk_policy['requested_workers']})",
+                          f"Chunk worker limits: connections {chunk_policy['connection_budget']}, memory {chunk_policy['memory_worker_limit']}"])
+        admission = report.get('publication_admission') or {}
+        if admission:
+            lines.extend(['', f"Publication pool: {admission['shared_total_mb']} MiB",
+                          f"Memory policy: {admission['policy']}",
+                          f"Memory reason: {admission.get('reason', '-')}"])
         destination_rows = report.get("destination_rows") or []
         if destination_rows:
             lines.extend(["", "ROWS BY DESTINATION"])

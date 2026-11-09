@@ -6,6 +6,20 @@ from ui.dialogs import ExpansionTimingReportDialog
 
 
 class ExpansionTimingTests(unittest.TestCase):
+    def test_recovery_and_publication_are_visible_without_changing_total(self):
+        report = {'engine': 'S4_NATIVE_BULK', 'fallback_reason': None,
+                  'shadow_chunks_reused': 8, 'shadow_chunks_done': 40,
+                  'shadow_chunks_total': 40, 'historical_timing_complete': False,
+                  'publication_tasks_reused': ['index:table1_pkey', 'validate:table2:fk'],
+                  'items': [{'stage': 'publication', 'name': 'Atomic publication',
+                             'seconds': 0.25, 'measurement': 'postgresql_backend_wall'}]}
+        text = ExpansionTimingReportDialog.build_report_text(report)
+        self.assertIn('Chunks reused/done/total: 8/40/40', text)
+        self.assertIn('Publication tasks reused: 2', text)
+        self.assertIn('validate:table2:fk', text)
+        self.assertIn('PUBLICATION\n', text)
+        self.assertIn('MEASURED PROCESSING TOTAL: 250.000 ms', text)
+
     def test_managed_insert_can_emit_postgresql_timing_and_row_count(self):
         sql = PostgresAdminService._build_managed_dml_sql(
             "INSERT INTO public.target_table (value) SELECT 1",
@@ -125,6 +139,7 @@ class ExpansionTimingTests(unittest.TestCase):
         ]
 
         with (
+            patch.dict('os.environ', {'PDM_EXPANSION_MODE': 'classic'}),
             patch.object(service, "table_exists", return_value=True),
             patch.object(
                 service,

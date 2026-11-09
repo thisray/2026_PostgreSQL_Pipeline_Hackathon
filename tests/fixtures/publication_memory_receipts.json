@@ -1,0 +1,252 @@
+[
+  {
+    "receipt": "evidence/g2-x86-20261102/summary.json",
+    "condition": "native-10m",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 33658159104,
+      "host_available_bytes": 32368676864,
+      "effective_limit_bytes": 32212254720,
+      "reclaimable_available_bytes": 21374742528
+    },
+    "previous_pool_mb": 10240
+  },
+  {
+    "receipt": "evidence/g2-x86-20261102/summary.json",
+    "condition": "sql-10m",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 33658159104,
+      "host_available_bytes": 32383508480,
+      "effective_limit_bytes": 32212254720,
+      "reclaimable_available_bytes": 7683227648
+    },
+    "previous_pool_mb": 1
+  },
+  {
+    "receipt": "evidence/g2-x86-20261102/summary.json",
+    "condition": "native-1m",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 33658159104,
+      "host_available_bytes": 32342855680,
+      "effective_limit_bytes": 32212254720,
+      "reclaimable_available_bytes": 29502676992
+    },
+    "previous_pool_mb": 10240
+  },
+  {
+    "receipt": "evidence/g2-x86-20261102/summary.json",
+    "condition": "native-100k",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 33658159104,
+      "host_available_bytes": 32352747520,
+      "effective_limit_bytes": 32212254720,
+      "reclaimable_available_bytes": 31482888192
+    },
+    "previous_pool_mb": 10240
+  },
+  {
+    "receipt": "evidence/rc3-20261102/summary.json",
+    "condition": "rc3-native100k",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 55201243136,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 25280651264
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc3-20261102/summary.json",
+    "condition": "rc3-native10m-ordinary",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 54214381568,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 25374113792
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc3-20261102/summary.json",
+    "condition": "rc3-native10m-superuser",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 56319717376,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 25388380160
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc3-20261102/summary.json",
+    "condition": "rc3-native1m",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 55328653312,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 25175142400
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc3-20261102/summary.json",
+    "condition": "rc3-native30m",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 53787828224,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 23194804224
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc3-20261102/summary.json",
+    "condition": "rc3-sql1m",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 54302318592,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 25363525632
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc4-20261102/summary.json",
+    "condition": "rc4-native100k",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 56671805440,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 25458470912
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc4-20261102/summary.json",
+    "condition": "rc4-native10m-ordinary",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 57975103488,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 25398308864
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc4-20261102/summary.json",
+    "condition": "rc4-native1m",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 56641970176,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 25497866240
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc4-20261102/summary.json",
+    "condition": "rc4-native30m",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 56321314816,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 23019376640
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc4-20261102/summary.json",
+    "condition": "rc4-sql1m",
+    "observed": {
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 55444185088,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 25477005312
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc5-20261103/summary.json",
+    "condition": "rc5-native100k",
+    "observed": {
+      "nproc": 10,
+      "effective_cpus": 8,
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 53678125056,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 25130643456
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc5-20261103/summary.json",
+    "condition": "rc5-native10m-ordinary",
+    "observed": {
+      "nproc": 10,
+      "effective_cpus": 8,
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 57373175808,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 25187618816
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc5-20261103/summary.json",
+    "condition": "rc5-native1m",
+    "observed": {
+      "nproc": 10,
+      "effective_cpus": 8,
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 55996936192,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 25151012864
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc5-20261103/summary.json",
+    "condition": "rc5-native30m",
+    "observed": {
+      "nproc": 10,
+      "effective_cpus": 8,
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 51482193920,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 23282442240
+    },
+    "previous_pool_mb": 8192
+  },
+  {
+    "receipt": "evidence/rc5-20261103/summary.json",
+    "condition": "rc5-sql1m",
+    "observed": {
+      "nproc": 10,
+      "effective_cpus": 8,
+      "verified_server": true,
+      "host_total_bytes": 130663231488,
+      "host_available_bytes": 50534690816,
+      "effective_limit_bytes": 25769803776,
+      "reclaimable_available_bytes": 25164111872
+    },
+    "previous_pool_mb": 8192
+  }
+]

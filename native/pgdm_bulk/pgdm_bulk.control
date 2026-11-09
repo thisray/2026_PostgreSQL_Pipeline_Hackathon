@@ -1,0 +1,5 @@
+comment = 'Same-transaction native decoding and bounded four-table bulk insertion for PostgreSQL 16/17/18'
+default_version = '1.5'
+module_pathname = '$libdir/pgdm_bulk'
+relocatable = false
+superuser = true

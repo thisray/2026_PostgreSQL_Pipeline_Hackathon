@@ -1,0 +1,2 @@
+-- RC3 preserves the API 1.2 exact-page MVCC helper contract.
+-- The new API and build identity prevent selecting an older install.

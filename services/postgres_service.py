@@ -1,8 +1,10 @@
 # -*- coding: latin-1 -*-
+import base64
 import csv
 import hashlib
 import io
 import json
+import os
 import re
 import shlex
 import sys
@@ -293,6 +295,8 @@ class PostgresAdminService:
         self._data_metadata_ready_databases = set()
         self._data_metadata_lock = threading.Lock()
         self._expansion_timing_local = threading.local()
+        self._pending_expansion_job_id = None
+        self._control_metadata_ready = False
 
     @staticmethod
     def create_cross_table_expansion_timing_report(
@@ -314,6 +318,17 @@ class PostgresAdminService:
             "destination_rows": [],
             "items": [],
         }
+
+    @staticmethod
+    def _record_expansion_engine(report, engine):
+        report['engine'] = engine
+        reason = report.get('fallback_reason')
+        report['items'] = [item for item in report.get('items', [])
+                           if item.get('measurement') != 'engine_information']
+        PostgresAdminService._append_expansion_timing(
+            report, 'information', 'Execution engine: ' + engine, 0,
+            'engine_information', include_in_total=False,
+            details=('Fallback reason: ' + reason) if reason else 'Selected execution engine')
 
     @staticmethod
     def _append_expansion_timing(
@@ -430,8 +445,9 @@ class PostgresAdminService:
             username=ssh_username,
             password=ssh_password,
             timeout=10,
-            look_for_keys=False,
-            allow_agent=False,
+            key_filename=os.getenv("PDM_SSH_KEY_FILE") or None,
+            look_for_keys=not bool(ssh_password),
+            allow_agent=not bool(ssh_password),
         )
         self.ssh_client = client
         self.ssh_host = host
@@ -457,6 +473,7 @@ class PostgresAdminService:
         self.sql_username = None
         self.sql_password = None
         self._data_metadata_ready_databases.clear()
+        self._control_metadata_ready = False
 
     def _register_active_channel(self, channel):
         with self._active_channels_lock:
@@ -568,9 +585,14 @@ class PostgresAdminService:
         command_started_at = time.perf_counter()
         self._trace_table_open(trace_context, f"{command_name}: iniciou comando remoto")
 
-        safe_password = shlex.quote(self.sql_password)
         safe_sql_port = shlex.quote(str(self.postgres_port or 5432))
-        wrapped_command = f"export PGPASSWORD={safe_password} PGPORT={safe_sql_port}; {command}"
+        remote_bin = os.getenv("PDM_REMOTE_BIN", "").strip()
+        path_prefix = f"export PATH={shlex.quote(remote_bin)}:$PATH; " if remote_bin else ""
+        wrapped_command = path_prefix + (
+            "IFS= read -r pgdm_password; "
+            'PGPASSWORD="$(printf %s "$pgdm_password" | base64 -d; printf .)"; PGPASSWORD=${PGPASSWORD%.}; export PGPASSWORD; '
+            f"unset pgdm_password; export PGPORT={safe_sql_port}; {command}"
+        )
         timing_context = getattr(
             self._expansion_timing_local,
             "context",
@@ -595,6 +617,7 @@ class PostgresAdminService:
         stdin, stdout, stderr = self.ssh_client.exec_command(wrapped_command)
         channel = stdout.channel
         self._register_active_channel(channel)
+        channel.sendall(base64.b64encode(self.sql_password.encode("utf-8")) + b"\n")
         output_chunks = []
         error_chunks = []
         started_at = time.monotonic()
@@ -608,6 +631,8 @@ class PostgresAdminService:
         try:
             self._raise_if_cancelled(cancel_event, channel)
 
+            if stdin_text is None:
+                channel.shutdown_write()
             if stdin_text is not None:
                 self._write_stdin_stream(
                     stdin,
@@ -685,10 +710,22 @@ class PostgresAdminService:
                             "remote_include_in_total"
                         ],
                     )
+                    if timing_context['report'] is not None:
+                        timing_context['report'].setdefault('remote_round_trips', []).append({
+                            'stage': timing_context['stage'], 'name': remote_name,
+                            'server_seconds': int(timing_matches[-1]) / 1_000_000_000.0,
+                            'client_seconds': time.perf_counter() - command_started_at,
+                            'include_in_total': timing_context['remote_include_in_total'],
+                        })
 
             if exit_status != 0:
                 raise RuntimeError(error.strip() or output.strip() or f"Comando remoto falhou com status {exit_status}.")
-            if error.strip() and not output.strip():
+            # Successful idempotent DDL can emit only PostgreSQL NOTICE lines.
+            notice_only = bool(error.strip()) and all(
+                re.match(r"^(?:psql:.*?:\d+:\s*)?NOTICE:", line.lstrip())
+                for line in error.strip().splitlines()
+            )
+            if error.strip() and not output.strip() and not notice_only:
                 raise RuntimeError(error.strip())
 
             result = output.strip()
@@ -726,13 +763,20 @@ class PostgresAdminService:
         if self.sql_password is None:
             raise RuntimeError("Senha do PostgreSQL nÃ£o disponÃ­vel.")
 
-        safe_password = shlex.quote(self.sql_password)
         safe_sql_port = shlex.quote(str(self.postgres_port or 5432))
-        wrapped_command = f"export PGPASSWORD={safe_password} PGPORT={safe_sql_port}; {command}"
+        remote_bin = os.getenv("PDM_REMOTE_BIN", "").strip()
+        path_prefix = f"export PATH={shlex.quote(remote_bin)}:$PATH; " if remote_bin else ""
+        wrapped_command = path_prefix + (
+            "IFS= read -r pgdm_password; "
+            'PGPASSWORD="$(printf %s "$pgdm_password" | base64 -d; printf .)"; PGPASSWORD=${PGPASSWORD%.}; export PGPASSWORD; '
+            f"unset pgdm_password; export PGPORT={safe_sql_port}; {command}"
+        )
 
         _stdin, stdout, _stderr = self.ssh_client.exec_command(wrapped_command)
         channel = stdout.channel
         self._register_active_channel(channel)
+        channel.sendall(base64.b64encode(self.sql_password.encode("utf-8")) + b"\n")
+        channel.shutdown_write()
         error_chunks = []
         text_buffer = ""
 
@@ -6207,7 +6251,9 @@ WHERE database_name = {sql_literal(database_name)}
         self.run_remote_command(command, cancel_event=cancel_event)
 
     def _ensure_control_metadata(self, cancel_event=None, trace_context: dict | None = None):
-        self.ensure_admin_schema(cancel_event=cancel_event, trace_context=trace_context)
+        if not self._control_metadata_ready:
+            self.ensure_admin_schema(cancel_event=cancel_event, trace_context=trace_context)
+            self._control_metadata_ready = True
 
     @staticmethod
     def _normalize_data_dictionary_aliases(aliases) -> str:
@@ -9040,7 +9086,7 @@ mkdir -p {shlex.quote(self.remote_storage_root)}/deletions/table
 
         return True
 
-    def ensure_admin_schema(self, cancel_event=None, trace_context: dict | None = None):
+    def ensure_admin_schema(self, cancel_event=None, trace_context: dict | None = None, sql_only=False):
         started_at = time.perf_counter()
         self._trace_table_open(trace_context, "ensure_admin_schema(): iniciando")
         sql = f"""
@@ -9276,6 +9322,8 @@ SET version_history_format = CASE
 END
 WHERE version_history_format IS NULL;
 """
+        if sql_only:
+            return sql
         command = (
             f"psql -h localhost -U {shlex.quote(self.sql_username)} "
             f"-d {shlex.quote(CONTROL_DB)} -X -c {shlex.quote(sql)}"
@@ -10570,7 +10618,7 @@ WHERE raw_dump_path = {sql_literal(dump_path)};
             if line.strip() and line.strip().lower() not in self.HIDDEN_DATABASES
         ]
 
-    def list_tables(self, db_name: str, cancel_event=None):
+    def list_tables(self, db_name: str, cancel_event=None, sql_only=False):
         if db_name == CONTROL_DB:
             sql = (
                 "SELECT schemaname || '.' || tablename "
@@ -10584,10 +10632,13 @@ WHERE raw_dump_path = {sql_literal(dump_path)};
                 "SELECT schemaname || '.' || tablename "
                 "FROM pg_tables "
                 f"WHERE schemaname NOT IN ('pg_catalog', 'information_schema', {sql_literal(CONTROL_SCHEMA)}, {sql_literal(LEGACY_CONTROL_SCHEMA)}) "
+                "AND schemaname !~ '^pgdm_shadow_' "
                 f"AND NOT (schemaname = 'public' AND tablename = {sql_literal(DATA_TABLE_ROW_COUNTS_NAME)}) "
                 "ORDER BY schemaname, tablename;"
             )
 
+        if sql_only:
+            return sql
         command = (
             f"psql -h localhost -U {shlex.quote(self.sql_username)} "
             f"-d {shlex.quote(db_name)} -X -At -c {shlex.quote(sql)}"
@@ -11711,7 +11762,7 @@ ROLLBACK;
         return statements
 
     @classmethod
-    def _mask_sql_literals_and_comments(cls, sql_text: str) -> str:
+    def _mask_sql_literals_and_comments(cls, sql_text: str, *, mask_literals: bool = True) -> str:
         masked = []
         index = 0
         text_length = len(sql_text)
@@ -11749,18 +11800,18 @@ ROLLBACK;
 
             if dollar_tag is not None:
                 if sql_text.startswith(dollar_tag, index):
-                    masked.extend(" " * len(dollar_tag))
+                    masked.extend(" " * len(dollar_tag) if mask_literals else dollar_tag)
                     index += len(dollar_tag)
                     dollar_tag = None
                     continue
-                masked.append("\n" if current_char == "\n" else " ")
+                masked.append(("\n" if current_char == "\n" else " ") if mask_literals else current_char)
                 index += 1
                 continue
 
             if in_single_quote:
-                masked.append("\n" if current_char == "\n" else " ")
+                masked.append(("\n" if current_char == "\n" else " ") if mask_literals else current_char)
                 if current_char == "'" and next_char == "'":
-                    masked.append(" ")
+                    masked.append(" " if mask_literals else next_char)
                     index += 2
                     continue
                 if current_char == "'":
@@ -11769,9 +11820,9 @@ ROLLBACK;
                 continue
 
             if in_double_quote:
-                masked.append("\n" if current_char == "\n" else " ")
+                masked.append(("\n" if current_char == "\n" else " ") if mask_literals else current_char)
                 if current_char == '"' and next_char == '"':
-                    masked.append(" ")
+                    masked.append(" " if mask_literals else next_char)
                     index += 2
                     continue
                 if current_char == '"':
@@ -11795,19 +11846,19 @@ ROLLBACK;
 
             dollar_candidate = cls._read_dollar_quote_tag(sql_text, index)
             if dollar_candidate:
-                masked.extend(" " * len(dollar_candidate))
+                masked.extend(" " * len(dollar_candidate) if mask_literals else dollar_candidate)
                 index += len(dollar_candidate)
                 dollar_tag = dollar_candidate
                 continue
 
             if current_char == "'":
-                masked.append(" ")
+                masked.append(" " if mask_literals else current_char)
                 in_single_quote = True
                 index += 1
                 continue
 
             if current_char == '"':
-                masked.append(" ")
+                masked.append(" " if mask_literals else current_char)
                 in_double_quote = True
                 index += 1
                 continue
@@ -12582,6 +12633,8 @@ END
         commands: set[str],
         delete_relationship_acknowledged: bool = False,
         cancel_event=None,
+        metadata=None,
+        sql_only=False,
     ):
         dml_commands = commands & {"insert", "update", "delete", "truncate"}
         if not dml_commands:
@@ -12660,15 +12713,18 @@ JOIN pg_namespace AS target_namespace ON target_namespace.oid = target.relnamesp
 WHERE target_namespace.nspname = {sql_literal(schema_name)}
   AND target.relname = {sql_literal(table_name)};
 """
-        command = (
-            f"psql -h localhost -U {shlex.quote(self.sql_username)} "
-            f"-d {shlex.quote(database_name)} -X -At -v ON_ERROR_STOP=1 -c {shlex.quote(sql)}"
-        )
-        output = self.run_remote_command(command, cancel_event=cancel_event).strip()
-        if not output:
-            raise RuntimeError(f"A tabela selecionada {schema_name}.{table_name} nao existe.")
+        if sql_only:
+            return sql
+        if metadata is None:
+            command = (
+                f"psql -h localhost -U {shlex.quote(self.sql_username)} "
+                f"-d {shlex.quote(database_name)} -X -At -v ON_ERROR_STOP=1 -c {shlex.quote(sql)}"
+            )
+            output = self.run_remote_command(command, cancel_event=cancel_event).strip()
+            if not output:
+                raise RuntimeError(f"A tabela selecionada {schema_name}.{table_name} nao existe.")
 
-        metadata = json.loads(output.splitlines()[-1])
+            metadata = json.loads(output.splitlines()[-1])
         if metadata.get("relation_kind") != "r" or metadata.get("is_partition"):
             raise RuntimeError(
                 "O contador automatico do botao SQL aceita alteracao de linhas apenas em tabelas comuns, "
@@ -12774,8 +12830,10 @@ ORDER BY MIN(version_code::integer), raw_schema;
         full_table_name: str,
         raw_schemas,
         cancel_event=None,
+        sql_only=False,
     ) -> list[dict]:
-        self._ensure_control_metadata(cancel_event=cancel_event)
+        if not sql_only:
+            self._ensure_control_metadata(cancel_event=cancel_event)
         schema_name, table_name = split_table_name(full_table_name)
         normalized_raw_schemas = self._dedupe_non_empty_strings(raw_schemas)
         if not normalized_raw_schemas:
@@ -12803,6 +12861,8 @@ WHERE database_name = {sql_literal(database_name)}
   AND table_name = {sql_literal(table_name)}
   AND raw_schema IN ({scope_sql});
 """
+        if sql_only:
+            return sql
         references = self._run_control_json_query(
             sql,
             cancel_event=cancel_event,
@@ -13173,15 +13233,23 @@ WHERE database_name = {sql_literal(database_name)}
     ) -> dict:
         placeholder = cls.CROSS_TABLE_SOURCE_PLACEHOLDER
         masked_statement = cls._mask_sql_literals_and_comments(statement)
-        placeholder_count = masked_statement.count(placeholder)
+        placeholder_matches = list(re.finditer(re.escape(placeholder), masked_statement, re.IGNORECASE | re.ASCII))
+        placeholder_count = len(placeholder_matches)
         if placeholder_count <= 0:
             raise RuntimeError(
                 f"Every INSERT must read the source through the {placeholder} placeholder."
             )
-        if statement.count(placeholder) != placeholder_count:
+        without_comments = cls._mask_sql_literals_and_comments(statement, mask_literals=False)
+        if len(re.findall(re.escape(placeholder), without_comments, re.IGNORECASE | re.ASCII)) != placeholder_count:
             raise RuntimeError(
-                f"The {placeholder} placeholder cannot appear inside text or comments."
+                f"The {placeholder} placeholder cannot appear inside text or quoted identifiers."
             )
+
+        def bind_source(replacement):
+            changed = statement
+            for match in reversed(placeholder_matches):
+                changed = changed[:match.start()] + replacement + changed[match.end():]
+            return changed
 
         sentinel_schema_name = "__pgdm_expansion_guard__"
         sentinel_table_name = "__raw_schema_scope__"
@@ -13200,7 +13268,7 @@ WHERE database_name = {sql_literal(database_name)}
             for kind, value, _depth in original_tokens
         ):
             raise RuntimeError("The recipe uses a reserved internal identifier.")
-        validation_statement = statement.replace(placeholder, sentinel_relation)
+        validation_statement = bind_source(sentinel_relation)
         tokens = cls._tokenize_managed_sql(validation_statement)
         if not tokens:
             raise RuntimeError("The expansion recipe is empty.")
@@ -13403,7 +13471,7 @@ WHERE database_name = {sql_literal(database_name)}
             f"    WHERE {sql_ident('raw_schema')} IN ({scope_sql})\n"
             ")"
         )
-        guarded_statement = statement.replace(placeholder, source_relation_sql)
+        guarded_statement = bind_source(source_relation_sql)
         return {
             "statement": guarded_statement.rstrip().rstrip(";").strip(),
             "destination_columns": destination_columns,
@@ -13432,7 +13500,7 @@ WHERE database_name = {sql_literal(database_name)}
             version_title = str(
                 (destination or {}).get("version_title") or ""
             ).strip()
-            sql_script = str((destination or {}).get("sql") or "").strip()
+            sql_script = str((destination or {}).get("sql") or "").lstrip("\ufeff").strip()
             if not full_table_name:
                 raise RuntimeError(f"Enter the table for destination {position}.")
             if not version_title:
@@ -13578,6 +13646,8 @@ WHERE database_name = {sql_literal(database_name)}
         database_name: str,
         destinations,
         cancel_event=None,
+        metadata=None,
+        sql_only=False,
     ):
         function_references = []
         for destination in destinations or []:
@@ -13645,21 +13715,25 @@ SELECT COALESCE(
 )::text
 FROM requested;
 """
-        command = (
-            f"psql -h localhost -U {shlex.quote(self.sql_username)} "
-            f"-d {shlex.quote(database_name)} -X -qAt -v ON_ERROR_STOP=1 "
-            f"-c {shlex.quote(sql)}"
-        )
-        output = self.run_remote_command(
-            command,
-            cancel_event=cancel_event,
-        ).strip()
-        try:
-            function_metadata = json.loads(output.splitlines()[-1] if output else "[]")
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "Could not validate the functions used by the expansion."
-            ) from exc
+        if sql_only:
+            return sql
+        function_metadata = metadata
+        if metadata is None:
+            command = (
+                f"psql -h localhost -U {shlex.quote(self.sql_username)} "
+                f"-d {shlex.quote(database_name)} -X -qAt -v ON_ERROR_STOP=1 "
+                f"-c {shlex.quote(sql)}"
+            )
+            output = self.run_remote_command(
+                command,
+                cancel_event=cancel_event,
+            ).strip()
+            try:
+                function_metadata = json.loads(output.splitlines()[-1] if output else "[]")
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "Could not validate the functions used by the expansion."
+                ) from exc
 
         problems = []
         for item in function_metadata or []:
@@ -13796,6 +13870,7 @@ SELECT json_build_object(
         post_commit_callback=None,
         timing_report: dict | None = None,
     ) -> dict:
+        self._pending_expansion_job_id = None
         if timing_report is None:
             timing_report = self.create_cross_table_expansion_timing_report(
                 database_name,
@@ -13823,130 +13898,135 @@ SELECT json_build_object(
             5,
             "Validating source, destinations, and counters...",
         )
-        with self.expansion_timing_scope(
-            timing_report,
-            "preflight",
-            "Verify source table existence",
-        ):
-            source_exists = self.table_exists(
-                database_name,
-                source_full_table_name,
-                cancel_event=cancel_event,
-            )
-        if not source_exists:
-            raise RuntimeError(
-                f"Source table {source_full_table_name} does not exist."
-            )
-
-        with self.expansion_timing_scope(
-            timing_report,
-            "preflight",
-            "Read and validate source column metadata",
-        ):
-            source_columns = {
-                item["name"]: item["type"]
-                for item in self.get_table_column_definitions(
+        if os.getenv("PDM_EXPANSION_MODE", "auto") in {"auto", "shadow", "native", "native_bulk", "s2", "s3"}:
+            from services.s2_preflight import preflight
+            with self.expansion_timing_scope(timing_report, "preflight", "Batch source, versions, functions, counters and destination checks"):
+                source_versions = preflight(self, database_name, source_full_table_name, prepared, cancel_event, requested=destinations)
+        else:
+            with self.expansion_timing_scope(
+                timing_report,
+                "preflight",
+                "Verify source table existence",
+            ):
+                source_exists = self.table_exists(
                     database_name,
                     source_full_table_name,
                     cancel_event=cancel_event,
                 )
-            }
-        missing_source_columns = [
-            column_name
-            for column_name in ("raw_schema", "raw_hash")
-            if column_name not in source_columns
-        ]
-        if missing_source_columns:
-            raise RuntimeError(
-                f"Source {source_full_table_name} is missing required columns: "
-                + ", ".join(missing_source_columns)
-                + "."
-            )
-
-        with self.expansion_timing_scope(
-            timing_report,
-            "preflight",
-            "Load Raw version references for the selected scope",
-        ):
-            source_versions = self.get_raw_schema_version_references(
-                database_name,
-                source_full_table_name,
-                prepared["raw_schemas"],
-                cancel_event=cancel_event,
-            )
-        referenced_raw_schemas = {
-            str(item.get("raw_schema") or "").strip()
-            for item in source_versions
-            if isinstance(item, dict)
-        }
-        missing_version_schemas = [
-            raw_schema
-            for raw_schema in prepared["raw_schemas"]
-            if raw_schema not in referenced_raw_schemas
-        ]
-        if missing_version_schemas:
-            raise RuntimeError(
-                "No Raw version is registered for the selected scope: "
-                + ", ".join(missing_version_schemas)
-                + "."
-            )
-
-        with self.expansion_timing_scope(
-            timing_report,
-            "preflight",
-            "Validate SQL function safety",
-        ):
-            self._validate_cross_table_expansion_functions(
-                database_name,
-                prepared["destinations"],
-                cancel_event=cancel_event,
-            )
-        with self.expansion_timing_scope(
-            timing_report,
-            "preflight",
-            "Ensure data-database metadata and row counters",
-        ):
-            self.ensure_data_database_metadata(
-                database_name,
-                cancel_event=cancel_event,
-            )
-        for destination in prepared["destinations"]:
-            full_table_name = destination["table_name"]
-            with self.expansion_timing_scope(
-                timing_report,
-                "preflight",
-                f"Verify destination {full_table_name}",
-            ):
-                destination_exists = self.table_exists(
-                    database_name,
-                    full_table_name,
-                    cancel_event=cancel_event,
-                )
-            if not destination_exists:
+            if not source_exists:
                 raise RuntimeError(
-                    f"Destination table {full_table_name} does not exist."
+                    f"Source table {source_full_table_name} does not exist."
                 )
+
             with self.expansion_timing_scope(
                 timing_report,
                 "preflight",
-                f"Read row counter for {full_table_name}",
+                "Read and validate source column metadata",
             ):
-                self.get_table_row_count(
+                source_columns = {
+                    item["name"]: item["type"]
+                    for item in self.get_table_column_definitions(
+                        database_name,
+                        source_full_table_name,
+                        cancel_event=cancel_event,
+                    )
+                }
+            missing_source_columns = [
+                column_name
+                for column_name in ("raw_schema", "raw_hash")
+                if column_name not in source_columns
+            ]
+            if missing_source_columns:
+                raise RuntimeError(
+                    f"Source {source_full_table_name} is missing required columns: "
+                    + ", ".join(missing_source_columns)
+                    + "."
+                )
+
+            with self.expansion_timing_scope(
+                timing_report,
+                "preflight",
+                "Load Raw version references for the selected scope",
+            ):
+                source_versions = self.get_raw_schema_version_references(
                     database_name,
-                    full_table_name,
+                    source_full_table_name,
+                    prepared["raw_schemas"],
+                    cancel_event=cancel_event,
+                )
+            referenced_raw_schemas = {
+                str(item.get("raw_schema") or "").strip()
+                for item in source_versions
+                if isinstance(item, dict)
+            }
+            missing_version_schemas = [
+                raw_schema
+                for raw_schema in prepared["raw_schemas"]
+                if raw_schema not in referenced_raw_schemas
+            ]
+            if missing_version_schemas:
+                raise RuntimeError(
+                    "No Raw version is registered for the selected scope: "
+                    + ", ".join(missing_version_schemas)
+                    + "."
+                )
+
+            with self.expansion_timing_scope(
+                timing_report,
+                "preflight",
+                "Validate SQL function safety",
+            ):
+                self._validate_cross_table_expansion_functions(
+                    database_name,
+                    prepared["destinations"],
                     cancel_event=cancel_event,
                 )
             with self.expansion_timing_scope(
                 timing_report,
                 "preflight",
-                f"Validate managed dependencies for {full_table_name}",
+                "Ensure data-database metadata and row counters",
             ):
-                self._validate_managed_sql_dependencies(
+                self.ensure_data_database_metadata(
                     database_name,
-                    full_table_name,
-                    {"insert"},
                     cancel_event=cancel_event,
                 )
+            for destination in prepared["destinations"]:
+                full_table_name = destination["table_name"]
+                with self.expansion_timing_scope(
+                    timing_report,
+                    "preflight",
+                    f"Verify destination {full_table_name}",
+                ):
+                    destination_exists = self.table_exists(
+                        database_name,
+                        full_table_name,
+                        cancel_event=cancel_event,
+                    )
+                if not destination_exists:
+                    raise RuntimeError(
+                        f"Destination table {full_table_name} does not exist."
+                    )
+                with self.expansion_timing_scope(
+                    timing_report,
+                    "preflight",
+                    f"Read row counter for {full_table_name}",
+                ):
+                    self.get_table_row_count(
+                        database_name,
+                        full_table_name,
+                        cancel_event=cancel_event,
+                    )
+                with self.expansion_timing_scope(
+                    timing_report,
+                    "preflight",
+                    f"Validate managed dependencies for {full_table_name}",
+                ):
+                    self._validate_managed_sql_dependencies(
+                        database_name,
+                        full_table_name,
+                        {"insert"},
+                        cancel_event=cancel_event,
+                    )
 
         self._notify_progress(
             progress_callback,
@@ -13959,11 +14039,74 @@ SELECT json_build_object(
         )
         self._raise_if_cancelled(cancel_event)
 
+        selected_mode = os.getenv("PDM_EXPANSION_MODE", "auto")
+        requested_mode = selected_mode
+        if selected_mode == 'auto':
+            from services.native_selection import select_native
+            if select_native(self, database_name, prepared, destinations, timing_report):
+                selected_mode = 'native_bulk'
+        if selected_mode in {"native", "native_bulk"}:
+            import copy
+            from services.s3_native_expansion import execute
+            from services.shadow_expansion import UnsupportedShadowError
+            try:
+                with self.expansion_timing_scope(timing_report, 'prepare', 'Plan and coordinate native expansion', remote_include_in_total=False):
+                    return execute(self, database_name, copy.deepcopy(prepared), destinations, source_versions, timing_report, progress_callback, post_commit_callback, native_bulk=selected_mode == 'native_bulk')
+            except UnsupportedShadowError as exc:
+                if requested_mode != 'auto':
+                    raise
+                timing_report['fallback_reason'] = 'Native eligibility: ' + str(exc)
+                selected_mode = 'auto'
+        if selected_mode in {"auto", "shadow", "shadow_serial", "s2", "s3"}:
+            import copy
+            from services.shadow_expansion import execute_shadow, UnsupportedShadowError
+            try:
+                return execute_shadow(self, database_name, copy.deepcopy(prepared), destinations, source_versions, timing_report, progress_callback, post_commit_callback)
+            except UnsupportedShadowError as exc:
+                if selected_mode != 'auto':
+                    raise
+                timing_report['fallback_reason'] = str(exc)
+
+        engine = selected_mode if selected_mode in {'compact', 'parallel', 'parallel8'} else 'classic'
+        self._record_expansion_engine(timing_report, engine)
+
+        recovery_signature = None
+        if os.getenv("PDM_EXPANSION_MODE") in {"compact", "parallel", "parallel8"}:
+            from services.expansion_recovery import fingerprint, pending_result, restore_report
+            with self.expansion_timing_scope(timing_report, "prepare", "Find committed data awaiting version finalization"):
+                recovery_signature = fingerprint(prepared, source_versions)
+                cached_result = pending_result(self, database_name, recovery_signature)
+            if cached_result:
+                self._pending_expansion_job_id = cached_result['expansion_job_id']
+                if post_commit_callback:
+                    post_commit_callback()
+                return restore_report(self, cached_result, timing_report)
+
         with self.expansion_timing_scope(
             timing_report,
             "prepare",
             "Build protected transactional SQL batch",
         ):
+            from services.expansion_optimizer import build_plan
+            fast_plan = build_plan(prepared, destinations)
+            if fast_plan is not None:
+                from services.shadow_expansion import CATALOG, read_json, validate_catalog
+                validate_catalog(read_json(self, database_name, CATALOG, timing_report,
+                                           'Validate legacy optimizer constraint capabilities'))
+            if fast_plan is None and selected_mode in {'compact', 'parallel', 'parallel8'}:
+                timing_report['fallback_reason'] = 'Requested optimizer requires the reviewed official six-table workload'
+                self._record_expansion_engine(timing_report, 'classic')
+            from uuid import uuid4
+            job_id = uuid4().hex if fast_plan else None
+            if fast_plan and fast_plan.get("create_sql"):
+                with self.expansion_timing_scope(
+                    timing_report, "execute", "Create shared compact stage and parallel support",
+                    record_local_cpu=False,
+                ):
+                    self.run_remote_command(
+                        f"psql -h localhost -U {shlex.quote(self.sql_username)} -d {shlex.quote(database_name)} -XqAt -v ON_ERROR_STOP=1 -f -",
+                        stdin_text=fast_plan["create_sql"], cancel_event=cancel_event,
+                    )
             execution_statements = []
             timing_sequence = 10
             for destination in prepared["destinations"]:
@@ -13973,7 +14116,7 @@ SELECT json_build_object(
                 ):
                     execution_statements.append(
                         self._build_managed_dml_sql(
-                            statement,
+                            fast_plan["inserts"][destination["pure_table_name"]] if fast_plan else statement,
                             destination["schema_name"],
                             destination["pure_table_name"],
                             "add",
@@ -13994,6 +14137,13 @@ SELECT json_build_object(
                 source_table_name,
                 prepared["raw_schemas"],
             )
+            if fast_plan:
+                manifest_sql = manifest_sql.replace(
+                    'FROM "public"."raw_data"\nWHERE',
+                    f"FROM {fast_plan.get('manifest_relation', fast_plan.get('stage_relation', 'pg_temp.pgdm_compact_stage'))}\nWHERE", 1,
+                )
+                if fast_plan.get('manifest_relation'):
+                    manifest_sql = manifest_sql.replace('COUNT(*)::bigint AS row_count', 'SUM(row_count)::bigint AS row_count', 1)
             destination_lock_sql = self._build_cross_table_expansion_lock_sql(
                 prepared["destinations"]
             )
@@ -14030,9 +14180,18 @@ SELECT json_build_object(
 )::text
 FROM pg_temp.pgdm_expansion_timings;
 """.strip()
+            outbox_sql = ""
+            if fast_plan:
+                from services.expansion_recovery import build_outbox
+                outbox_sql = build_outbox(job_id, recovery_signature, {
+                    "source_database_name": database_name,
+                    "source_schema_name": source_schema_name, "source_table_name": source_table_name,
+                    "raw_schemas": prepared["raw_schemas"], "source_versions": source_versions,
+                    "destinations": prepared["destinations"], "expansion_job_id": job_id,
+                }, manifest_sql)
             wrapped_sql = (
                 timing_table_sql
-                + "\n\nBEGIN ISOLATION LEVEL REPEATABLE READ;\n"
+                + f"\n\nBEGIN ISOLATION LEVEL {fast_plan.get('isolation', 'REPEATABLE READ') if fast_plan else 'REPEATABLE READ'};\n"
                 + "INSERT INTO pg_temp.pgdm_expansion_timings VALUES "
                 + "(1, 'execute', 'Initialize database transaction', "
                 + "clock_timestamp(), NULL, NULL, NULL, NULL);\n"
@@ -14045,6 +14204,7 @@ FROM pg_temp.pgdm_expansion_timings;
                 + destination_lock_sql
                 + "\nUPDATE pg_temp.pgdm_expansion_timings SET finished_at = "
                 + "clock_timestamp() WHERE sequence_number = 2;\n\n"
+                + (fast_plan["prepare"] if fast_plan else "")
                 + "INSERT INTO pg_temp.pgdm_expansion_timings VALUES "
                 + "(3, 'execute', 'Scan source and build dependency manifest', "
                 + "clock_timestamp(), NULL, NULL, NULL, NULL);\n"
@@ -14052,6 +14212,8 @@ FROM pg_temp.pgdm_expansion_timings;
                 + "\nUPDATE pg_temp.pgdm_expansion_timings SET finished_at = "
                 + "clock_timestamp() WHERE sequence_number = 3;\n\n"
                 + "\n\n".join(execution_statements)
+                + (fast_plan["finalize"] if fast_plan else "")
+                + outbox_sql
                 + "\n\nINSERT INTO pg_temp.pgdm_expansion_timings VALUES "
                 + "(9000, 'execute', 'Commit expansion transaction', "
                 + "clock_timestamp(), NULL, NULL, NULL, NULL);\n"
@@ -14090,6 +14252,7 @@ FROM pg_temp.pgdm_expansion_timings;
                     message,
                 ),
             )
+        self._pending_expansion_job_id = job_id
         if post_commit_callback:
             post_commit_callback()
 
@@ -14112,6 +14275,8 @@ FROM pg_temp.pgdm_expansion_timings;
                     continue
                 if "raw_hash_manifest" in parsed_candidate:
                     manifest = parsed_candidate
+                if "pgdm_stage_bytes" in parsed_candidate:
+                    timing_report["stage_peak_bytes"] = parsed_candidate["pgdm_stage_bytes"]
                 if "pgdm_expansion_timings" in parsed_candidate:
                     server_timing_items = list(
                         parsed_candidate.get("pgdm_expansion_timings") or []
@@ -14142,6 +14307,13 @@ FROM pg_temp.pgdm_expansion_timings;
             "Data committed to the destinations.",
         )
 
+        if fast_plan:
+            manifest["optimizer"] = "compact-v1"
+            manifest["original_sql_recipes"] = {
+                d["table_name"]: d.get("original_sql_recipe", d["sql_recipe"])
+                for d in prepared["destinations"]
+            }
+
         timing_report["source_rows"] = int(
             manifest.get("expected_row_count") or 0
         )
@@ -14166,6 +14338,7 @@ FROM pg_temp.pgdm_expansion_timings;
         )
 
         return {
+            "expansion_job_id": job_id,
             "source_database_name": database_name,
             "source_schema_name": source_schema_name,
             "source_table_name": source_table_name,
@@ -14966,6 +15139,7 @@ COMMIT;
             "Ensure control metadata for version registration",
         ):
             self._ensure_control_metadata(cancel_event=cancel_event)
+        job_id = expansion_result.get("expansion_job_id")
         build_cpu_started_at = time.thread_time()
         database_name = str(
             (expansion_result or {}).get("source_database_name") or ""
@@ -15000,6 +15174,8 @@ COMMIT;
             raise RuntimeError(
                 "The expansion result did not preserve Raw version references."
             )
+        if job_id:
+            base_manifest["expansion_job_id"] = job_id
         base_manifest["source_versions"] = source_versions
         base_manifest["raw_schemas"] = raw_schemas
 
@@ -15024,6 +15200,9 @@ CREATE TEMP TABLE pgdm_expansion_timings (
 """.strip(),
             "BEGIN;",
         ]
+        if job_id:
+            from services.expansion_recovery import finalization_guard
+            sql_parts.append(finalization_guard(job_id, CONTROL_SCHEMA))
         normalized_destinations = []
         destination_lock_keys = []
         seen_destination_keys = set()
@@ -15213,6 +15392,9 @@ FROM inserted_version;
             normalized_destinations.append(full_table_name)
             version_statement_sequence += 1
 
+        if job_id:
+            from services.expansion_recovery import finalization_receipt
+            sql_parts.append(finalization_receipt(job_id, CONTROL_SCHEMA))
         sql_parts.extend(
             [
                 """
@@ -15351,6 +15533,11 @@ DROP TABLE pg_temp.pgdm_expansion_timings;
                 + "; ".join(problems)
                 + "."
             )
+
+        if job_id:
+            from services.expansion_recovery import mark_complete
+            with self.expansion_timing_scope(timing_report, "version", "Mark durable expansion job complete"):
+                expansion_result['_refreshed_tables'] = mark_complete(self, database_name, job_id, reload_catalog=True)
 
         self._notify_progress(
             progress_callback,
