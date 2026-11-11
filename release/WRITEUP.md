@@ -2,105 +2,93 @@
 
 - Repository: https://github.com/thisray/2026_PostgreSQL_Pipeline_Hackathon
 - Submission commit: given in the submitted Kaggle Writeup; branch `main` points to it.
-- Setup, benchmark and recovery-test instructions: `README.md` in the repository.
+- Setup, benchmark and recovery tests: `README.md` in the repository.
 
-**Summary.** On a freshly generated official 10M-row input, Expand through the Windows GUI → SSH → Linux path takes 64 s with the C extensions installed, against 743 s for the original code in an earlier run of the same kind (not a controlled comparison, see section 3). An interrupted expansion resumes from its committed work, and rerunning Expand completes any missing version registration. The six output tables matched our reference outputs in every checked run, and row contents matched the original code's output in our earlier comparisons. Known difference: some surrogate `id` values, notably in `table2`, are assigned by a formula and differ from the original's, and not all ids were compared (section 6). All numbers are our own local measurements, not official scores.
+On a fresh official 10M-row database, Expand through the Windows GUI → SSH → Linux path finishes in 64 s with our C extensions installed. The original code took 743 s in our earlier run, on a different PostgreSQL version and CPU allotment (section 3). An interrupted Expand resumes from its committed work instead of starting over, and a missing version registration is completed by running Expand again. The output matched our reference outputs in every checked run; some surrogate ids, notably in table2, differ from the original's (section 6). All numbers here are our own local measurements, not official scores.
 
-## 1. Bottlenecks in the original implementation
+## 1. Where the original spends its time
 
-At 10M rows the original Expand took 743.4 s (Windows GUI → SSH → Linux server, PostgreSQL 16.13). Six `INSERT ... SELECT` statements make up 736.9 s of it (99.1%): table2 298 s, table1 192 s, table6 114 s, table5 99 s, table3 20 s, table4 14 s. They run one after another. Each re-reads and re-decodes the JSONB source, and inserts into tables that already carry primary keys, foreign keys and indexes.
+At 10M rows the original Expand took 743.4 s. Of that, 736.9 s (99.1%) went to six `INSERT ... SELECT` statements: table2 298 s, table1 192 s, table6 114 s, table5 99 s, table3 20 s, table4 14 s. They run one after another, each one reads and decodes the whole JSONB source again, and each inserts into tables that already have their primary keys, foreign keys and indexes.
 
-The original also runs as one uninterrupted operation without checkpoints, and the version record is written afterwards in a separate database (the control database `postgres_data_manager`). An interruption therefore loses the work done so far, or leaves published data without a version record.
+The operation also has no checkpoints. An interruption loses all work done so far. Versions are registered afterwards in a separate control database (`postgres_data_manager`), so a failure at the wrong moment leaves published data without a version record.
 
-## 2. Strategy, architecture and optimizations
+## 2. What we changed
 
-We keep the Windows GUI → SSH → Linux PostgreSQL architecture, the official generator and the six recipes. When the application sees the six official recipes, it replaces the six sequential statements with this plan; any other recipe set runs the original code path.
+The Windows GUI → SSH → Linux PostgreSQL architecture, the official generator and the six recipes stay as they are. When the application recognizes the six official recipes, it runs the following plan instead of the six statements. Any other recipe set uses the original code.
 
-1. Split the source rows (`raw_data`) into chunks. Each chunk is decoded once; the four large tables (table1, table2, table5, table6) are derived from that single decode, and the two small dimension tables (table3, table4) from the values actually observed.
-2. Load the chunks in parallel into private "shadow" tables (same columns as the final tables, in a separate schema). The chunk's rows and a "done" record for it (a row in a progress table) commit in the same transaction.
-3. Build indexes and validate foreign keys concurrently, within CPU and memory limits.
-4. Publish atomically: after rechecking that source and destination are unchanged and that all chunks, indexes and constraints are complete and valid, move the six shadow tables into `public` in one transaction. They become the final tables, so no second copy of the output exists.
+1. Split `raw_data` into chunks and decode each chunk once. The four large tables (table1, table2, table5, table6) come from that single decode; the dimension tables table3 and table4 are built from the values actually seen.
+2. Load the chunks in parallel into private shadow tables (same columns as the final tables, in a separate schema). Each chunk's rows and its "done" record commit in the same transaction.
+3. Build the indexes and validate the foreign keys in parallel, within a shared memory limit.
+4. Recheck that source and destinations are unchanged and that everything is complete, then move the six shadow tables into `public` in one transaction. They become the final tables, so the output is never copied a second time.
 
-**Database side**
-- Two modes. Optional C extensions (`pgdm_decode`, `pgdm_bulk`) decode the JSON, build rows and write them in bulk. If they are missing or incompatible, the application automatically runs the same plan in SQL (slower, same outputs). The report names the mode with a label: `S4_NATIVE_BULK` for extension mode, `S3` for SQL-only mode.
-- Only the fields actually present in each JSON row are extracted, and for `table2` only the populated position slots (up to 14 per row) are expanded.
-- Nothing is precomputed or hard-coded: row counts, dimension tables and values all come from the data. The only data-shape constant is the 14 position slots per row that the official `table2` recipe expands.
-- Foreign keys are still created and checked by PostgreSQL's own `ALTER TABLE ... VALIDATE CONSTRAINT`. While the indexes are built, the extension records which keys actually occur in each parent and child table, taken from the stored rows rather than from the source data. Inside the validation command it lets PostgreSQL answer "does every child key have a parent?" from those key sets instead of re-scanning the child table. This is used only when the sets are complete and the tables are unchanged since; in every other case PostgreSQL scans as usual. In our scratch tests (29 cases, 11 of them invalid data: child rows without a parent or with a missing parent key, also with NULL keys and dead tuples) validation rejected every invalid case.
-- Index builds and validations run in parallel, drawing memory from one shared pool of at most 8192 MiB, with `work_mem` at most 64 MiB per task.
+Database side:
 
-**Python side**
-- One combined preflight (source, destinations, functions, counters) replaces many separate SSH commands.
-- The application plans the chunks, starts and monitors the server-side workers, schedules the index and validation tasks and builds the timing report, which also shows reused chunks.
-- Version registration survives interruption: the data transaction records what must be registered, and registration in the control database is safe to repeat (a lock plus one completion record per job).
-- The GUI gains "Expand → Discard interrupted expansion" to abandon a pending job.
+- Two optional C extensions, `pgdm_decode` and `pgdm_bulk`, decode the JSON and write rows in bulk. If they are missing or the installed build does not match, the application runs the same plan in plain SQL: slower, same output. The report names the mode: `S4_NATIVE_BULK` with the extensions, `S3` in SQL-only mode.
+- Only the JSON fields present in each row are extracted, and for table2 only the occupied position slots (up to 14 per row) are expanded.
+- Nothing is hard-coded or precomputed. Row counts, dimension tables and values all come from the data; the only shape constant is the 14 slots of the official table2 recipe.
+- Foreign keys are still created and checked by PostgreSQL's own `ALTER TABLE ... VALIDATE CONSTRAINT`. While the indexes are built, the extension collects the keys that actually occur in the stored parent and child rows. If those key sets are complete and the tables have not changed since, validation uses them instead of scanning the child table again; otherwise PostgreSQL scans as usual. In 29 test cases, 11 of them with invalid data (orphan child rows or missing parent keys, also combined with NULL keys and dead tuples), validation rejected every invalid case.
+- Index builds and validations share one memory pool of at most 8192 MiB, with `work_mem` capped at 64 MiB per task.
 
-All work that the original counted in the metric (preparation, self-check, loading, index and constraint rebuilds, publication, version registration, cleanup) stays inside the measured total; parallel phases count once.
+Python side:
 
-## 3. Measured improvements
+- One combined preflight replaces many separate SSH round trips for the source, destination and function checks.
+- The application plans the chunks, starts and watches the server-side workers, schedules the index and validation tasks, and writes the timing report, including how many chunks were reused.
+- Version registration is safe to repeat: the data transaction records what still has to be registered, and the control-database step runs under a lock with one completion record per job.
+- A new menu entry, Expand → Discard interrupted expansion, abandons a pending job.
 
-**Original vs. submitted code**, fresh official data, Windows GUI → SSH → Linux server, 53,225,999 output rows at 10M in both runs:
+Everything the original measured (preparation, checks, loading, index and constraint builds, publication, version registration, cleanup) is still inside `MEASURED PROCESSING TOTAL`. Phases that run in parallel count once.
+
+## 3. Results (local measurements)
+
+Fresh official data, real Windows GUI on a desktop PC → SSH → Linux server (PostgreSQL in a container on an NVIDIA GB10 machine, ARM64), fsync and synchronous commit on. Both runs produced 53,225,999 output rows at 10M:
 
 | | Original | Submitted (extensions installed) |
 | --- | ---: | ---: |
-| 10M rows: `MEASURED PROCESSING TOTAL` | 743.4 s | 64.2 s |
-| 10M rows: wall time of the whole GUI operation* | 748.7 s | 68.3 s |
-| 1M rows: `MEASURED PROCESSING TOTAL` | not measured | 3.4 s (wall 6.9 s) |
+| 10M rows, `MEASURED PROCESSING TOTAL` | 743.4 s | 64.2 s |
+| 10M rows, wall time of the GUI operation | 748.7 s | 68.3 s |
+| 1M rows, `MEASURED PROCESSING TOTAL` | not measured | 3.4 s |
 | PostgreSQL | 16.13, `shared_buffers` 2 GiB, `max_wal_size` 16 GiB | 18, default settings |
-| CPU | 8-CPU container | 3 CPU cores on a shared, busy host |
+| CPU | 8-CPU container | 3 cores of a shared, busy host |
 | Date | 2026-10-29 | 2026-11-07 |
 
-\*Wall time includes SSH transit and GUI overhead that the official metric excludes (4.1 s for the submitted run, 5.3 s for the original).
+That is about 11.6× faster, but it is not a controlled comparison: the PostgreSQL version, CPU allotment and date differ, and autovacuum was still running on the source table during the original run.
 
-The ratio is about 11.6×, but the runs are not a controlled comparison: the PostgreSQL major version, CPU allotment and date differ, and the original ran first while autovacuum was still active on the source table. Both ran through the real Windows GUI, with fsync and synchronous commit on. In the same GUI session as the submitted run, an earlier build in SQL-only mode took 141.8 s at 10M rows and 13.2 s at 1M.
+Clean x86 VM: AMD EPYC 7B12, 4 vCPU, 30 GiB RAM, PostgreSQL 18.6 with default settings, fsync and data checksums on, one fresh 10M input, run without the GUI by calling the application's Expand code directly. This used the build just before the submitted one. The only difference is that foreign-key validation now uses the collected key sets in every case, including small inputs and small memory pools; on the default path this made no measurable difference at 10M.
 
-**Clean x86 VM, run headless through the application service (no GUI)** (AMD EPYC 7B12, 4 vCPU, 30 GiB, PostgreSQL 18.6 with default settings, fsync and data checksums on, one shared fresh 10M input). The extensions were installed for the first two runs and absent for the third. The build is an earlier one that differs from the submitted code only by the proof changes described below, which did not measurably change the 10M default path.
-
-| Mode | Total | CPU seconds in the timing scope | Peak RAM* | Temporary files written** |
+| Mode | Total | CPU seconds | Peak RAM | Temporary files |
 | --- | ---: | ---: | ---: | ---: |
-| Extensions, run 1 | 144.7 s | 153.3 | 1.33 GB | 0 bytes |
-| Extensions, run 2 | 126.4 s | 134.2 | 1.50 GB | 0 bytes |
-| SQL-only | 244.7 s | 707.4 | 3.25 GB | 0 bytes |
+| Extensions, run 1 | 144.7 s | 153.3 | 1.33 GB | 0 |
+| Extensions, run 2 | 126.4 s | 134.2 | 1.50 GB | 0 |
+| SQL-only | 244.7 s | 707.4 | 3.25 GB | 0 |
 
-\*Sampled anonymous plus shared memory of the whole test container (PostgreSQL and application).
+CPU seconds are counted within the timed operation. Peak RAM is the sampled anonymous plus shared memory of the whole test container. Temporary files are the sort and hash spills PostgreSQL wrote; temporary tables are not included. Seconds from different machines are not comparable.
 
-\*\*Cumulative bytes of temporary files PostgreSQL wrote (spills of sorts and hashes); temporary tables are not counted.
-
-With the extensions this build was 1.7–1.9× faster than in SQL-only mode. These seconds differ from the Windows-GUI runs above because CPU, storage, PostgreSQL build and access path differ; compare only within a table.
-
-Changes made after that session, measured separately: the foreign-key key-set collection no longer depends on the memory pool being large enough and is used in every validation transaction, and it is now also used for inputs up to 1M rows. On a 4-vCPU Intel Xeon VM, four 1M-row pairs all improved (total −28%, CPU −33%, the publication phase about 2.0 s instead of 4.8–7.3 s, excluding the first, cold run). At 10M no difference was measurable, so we claim no 10M gain. With a deliberately small 2 GiB pool at 30M rows, the index-and-validation phase improved in three paired tests (−12% to −52%).
-
-**Output checks.** After each measured run the six tables were compared with a reference output, all columns including ids, duplicates counted, using `SELECT *` in both directions with `EXCEPT ALL`: no differences. The references came from earlier builds of this solution, which during development were compared with the original code's output (100k rows column by column without surrogate ids; 10M rows by row counts and 64-bit fingerprints). Our final-build checks use these references rather than the original code's output.
-
-Foreign-key anti-joins found no orphan rows; identity sequences, the six versions with their dependencies and one completion record were verified. A clean-room run of the exported repository (Ubuntu with distribution PostgreSQL 18, ordinary role, real Windows GUI) passed the same checks at 1M and 10M, plus a 100k run without extensions.
+**Correctness.** After each measured run, all six tables were compared with a reference output in both directions with `EXCEPT ALL` (all columns including ids, duplicates counted), with no differences. The references came from earlier builds of this solution, which were checked against the original code during development: at 100k rows column by column (surrogate ids excluded), at 10M by row counts and 64-bit fingerprints. Foreign-key anti-joins found no orphan rows, and the sequences, the six versions with their dependencies and the job's completion record were checked. An earlier release of this repository was also installed from scratch on a clean machine (Ubuntu, distribution PostgreSQL 18, ordinary role, real Windows GUI) and passed the same checks at 1M and 10M, and at 100k without the extensions.
 
 ## 4. Resource usage
 
-- **RAM.** On the clean VM the extension build peaked at 1.3–1.5 GB and SQL-only mode at 3.25 GB. For the submitted version in the Windows-GUI runs the sampled peak was 1.56 GB at 10M rows and 0.27 GB at 1M (sampled values, not per-process RSS). The 8192 MiB cap limits only the memory grants for index builds and validation; `shared_buffers`, loaders, key sets, the OS cache and other sessions come on top.
-- **Temporary disk.** PostgreSQL wrote no temporary files in the three VM runs above, nor in the 10M and 1M GUI runs. Larger inputs or smaller pools can spill: in one 30M-row pair with a 2 GiB pool, cumulative temporary writes fell from 7.19 GB to 3.35 GB with the proof change (not a peak-space measurement). SQL-only mode keeps a temporary table (stage) per active chunk, which does not show up as temporary files. WAL volume was not measured in the final runs.
-- **Extra persistent storage.** The shadow tables are working storage until publication, then become the final tables; at 10M rows they and their indexes peaked at 5.0 GB (sampled). The job and chunk records, the version record and the completion record remain: about 0.7 MB (extensions) and 1.3 MB (SQL-only) at 10M, measured on an earlier build. Plan disk for the source table, output, indexes, temporary files and WAL separately. The original application's raw dumps and version history are kept.
+- **RAM.** In the submitted build's GUI runs the sampled peak was 1.56 GB at 10M and 0.27 GB at 1M. On the VM it was 1.3–1.5 GB with the extensions and 3.25 GB in SQL-only mode. The 8192 MiB pool limits only index and validation memory; `shared_buffers`, the loading workers and the OS cache come on top.
+- **Temporary disk.** PostgreSQL wrote no temporary files in the VM runs or in the submitted build's GUI runs. Larger inputs or a smaller memory pool can make index sorts spill. SQL-only mode also keeps one temporary stage table per active chunk.
+- **Extra storage.** The shadow tables become the final tables, so there is no second copy of the output (at 10M the tables and their indexes reached 5.0 GB). What remains afterwards is the job, chunk, version and completion records: about 0.7 MB at 10M, 1.3 MB in SQL-only mode (measured on an earlier build). The original raw dumps and version history are kept.
 
-## 5. Checkpoint, resume and failure recovery
+## 5. Checkpoints and recovery
 
-Source writes are blocked while a job is pending, and locks prevent two workers from loading the same chunk. Repeating the same Expand reuses committed chunks and valid indexes and constraints, after checking that source, recipes, mode and schema are unchanged. The durable record written together with the data closes the gap between data publication and version registration.
+While a job is pending, writes to its source table are blocked, and locks keep two workers from loading the same chunk. Running the same Expand again resumes the job: after checking that source, recipes, mode and schema are unchanged, it reuses the committed chunks and any valid indexes and constraints. Killing the client does not stop the server-side workers, which keep loading; on rerun the application reuses every chunk they committed. Chunks in flight when PostgreSQL crashes are rolled back and redone.
 
-| Interruption | Observed result |
+| Interruption | Result |
 | --- | --- |
-| GUI process killed during loading, 10M, submitted version, real Windows GUI | Same job resumed; all 160 chunks reused; committed chunk records unchanged; six tables identical to the reference |
-| Same test in the clean-room run of the exported repository | 3 of 160 chunks were committed at the kill; the server workers finished the rest; all 160 reused on rerun |
-| PostgreSQL immediate stop and restart during publication, 10M* | Same job reused 160/160 chunks and 9 indexes; 6.7 s of work remained |
-| Client interrupted in SQL-only mode, 1M* | Reused 8/8 chunks; output identical |
-| Client interrupted near the end of a native 1M run* | Reused 8/8 chunks |
-| Interrupted job discarded* | Empty output, sequences unchanged, no versions for the job |
-| Stopped after the data commit but before version registration, 10M (early build) | Rerun registered the six versions and dependencies in 7.6 s without reloading; repeating the registration step added none |
+| GUI process killed during loading (10M, real GUI) | Same job resumed, 160/160 chunks reused, output identical to the reference |
+| PostgreSQL immediate stop during publication (10M)† | 160/160 chunks and 9 indexes reused; the rerun finished the remaining work in 6.7 s |
+| Client interrupted in SQL-only mode (1M)† | 8/8 chunks reused, output identical |
+| Interrupted job discarded† | Output tables empty, sequences unchanged, no versions recorded |
+| Stopped after the data commit, before version registration (10M, early build) | Rerun registered the six versions in 7.6 s without reloading; repeating the registration step added none |
 
-\*Run on the build just before the submitted one.
+† Measured on an earlier build. README section 8 explains how to run these tests. OS crashes and power loss were not tested.
 
-Server workers keep running after the client is killed, so the first rows show that finished work is kept and not redone; they are not a mid-chunk restart. Chunks that were in flight when PostgreSQL crashed are rolled back and redone. To reproduce, follow README section 8. These tests do not cover OS crashes or power loss.
+## 6. Limitations
 
-## 6. Known limitations and trade-offs
-
-- **Surrogate ids.** Row contents, row counts and foreign-key relations match the original; some surrogate `id` values do not. In an audit of an early build, `table1`, `table3` and `table5` ids were identical to the original's. `table2` ids are `(raw_id − 1) × 14 + slot position` (`bigint`): unique, but not the original's dense 1…N range (at 10M rows the largest id is 139,999,988 for 23,225,968 rows). `table6` ids in the original depend on the query plan, and we did not compare the ids of `table4`. Sequences continue after the largest id.
-- The fast path targets the six official recipes on empty, ordinary destination tables with compatible grants, no row-level security and no outside dependencies; other cases use the original path or fail with an explicit message. A pending job blocks writes to its source table.
-- The extensions need one administrator installation (compiler, PostgreSQL server headers); without them the application is slower but correct. PostgreSQL 18 is tested end to end; 16 and 17 are only compile-checked.
-- Scaling: from 1M to 10M rows the processing total grew about 19× (3.4 s to 64.2 s). The largest run is 30M rows (memory-pool test); there is no 300M run, and no OS-crash or power-loss test.
-- Timings come from a shared host and small VMs; same-condition runs there differed by up to about 45%, and different machines are not comparable.
+- **Surrogate ids.** Row contents, row counts and foreign-key relations match the original, but some surrogate ids do not. table2 ids are `(raw_id − 1) × 14 + slot`: unique `bigint` values, but not the original's dense 1…N (at 10M the largest is 139,999,988 for 23,225,968 rows). table6 ids in the original depend on the query plan, and table4 ids were not compared. In an audit of an early build, table1, table3 and table5 ids were identical to the original's. Sequences continue after the largest id.
+- The fast path covers the six official recipes on empty, ordinary destination tables (compatible grants, no row-level security, no outside dependencies). Other cases run the original code or stop with a clear message.
+- The extensions need a one-time administrator install (C compiler, PostgreSQL server headers). PostgreSQL 18 is tested end to end; on 16 and 17 we only checked that the extensions compile.
+- From 1M to 10M rows the total grew about 19× (3.4 s to 64.2 s). The largest input we ran is 30M rows, in a memory-pool test; there is no 300M run.
+- Our timings come from a shared host and small VMs, where repeated runs under the same conditions differed by up to about 45%.
